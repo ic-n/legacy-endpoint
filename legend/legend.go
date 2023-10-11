@@ -1,11 +1,13 @@
 package legend
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/ic-n/wait"
 	"github.com/pkg/errors"
 )
 
@@ -17,7 +19,6 @@ type CollectorConfig struct {
 
 type Controller struct {
 	Collectors []CollectorConfig
-	ErrHandler func(error)
 }
 
 func New() *Controller {
@@ -37,52 +38,49 @@ func (ctrl Controller) Handle() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		document := make(map[string]any)
 
-		for i, cc := range ctrl.Collectors {
-			requestID, err := cc.Prepare(r)
-			if err != nil {
-				if ctrl.ErrHandler != nil {
-					ctrl.ErrHandler(errors.Wrap(err, "failed to prepare for request"))
+		g := wait.WithContext[map[string]any](r.Context())
+		for i := range ctrl.Collectors {
+			i := i
+			cc := ctrl.Collectors[i]
+
+			g.Go(func(ctx context.Context) (map[string]any, error) {
+				requestID, err := cc.Prepare(r)
+				if err != nil {
+					return nil, errors.Wrap(err, "failed to prepare for request")
 				}
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
 
-			memKey := fmt.Sprintf("%d:%s", i, requestID)
-			c, ok := mem[memKey]
-			if ok && time.Until(c.lastRefresh) < cc.Validity {
-				for k, v := range c.fragment {
-					document[k] = v
+				memKey := fmt.Sprintf("%d:%s", i, requestID)
+				c, ok := mem[memKey]
+				if ok && time.Until(c.lastRefresh) < cc.Validity {
+					return c.fragment, nil
 				}
-				continue
-			}
 
-			fragment, err := cc.Collect(r)
-			if err != nil {
-				if ctrl.ErrHandler != nil {
-					ctrl.ErrHandler(errors.Wrap(err, "failed to collect fragment for request"))
+				fragment, err := cc.Collect(r)
+				if err != nil {
+					return nil, errors.Wrap(err, "failed to collect fragment for request")
 				}
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
 
-			mem[memKey] = collector{
-				lastRefresh: time.Now(),
-				fragment:    fragment,
-			}
+				mem[memKey] = collector{
+					lastRefresh: time.Now(),
+					fragment:    fragment,
+				}
 
-			for k, v := range fragment {
+				return fragment, nil
+			})
+		}
+
+		if err := g.Gather(func(f map[string]any) {
+			for k, v := range f {
 				document[k] = v
 			}
+		}); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		err := json.NewEncoder(w).Encode(document)
-		if err != nil {
-			if ctrl.ErrHandler != nil {
-				ctrl.ErrHandler(errors.Wrap(err, "failed to write response"))
-			}
-			return
-		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(document)
 	})
 }
