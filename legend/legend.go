@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/allegro/bigcache/v3"
@@ -13,38 +14,49 @@ import (
 	"github.com/pkg/errors"
 )
 
-type CollectorConfig struct {
-	Validity time.Duration
-	Prepare  func(r *http.Request) (requestID string, err error)
-	Collect  func(r *http.Request) (fragment json.RawMessage, err error)
+type Collector interface {
+	Prepare(r *http.Request) (requestID string, err error)
+	Collect(r *http.Request) (fragment json.RawMessage, err error)
+}
+
+type collectorConfig struct {
+	collector Collector
+	validity  time.Duration
 }
 
 type Controller struct {
-	Collectors []CollectorConfig
+	collectors []collectorConfig
 }
 
 func New() *Controller {
 	return &Controller{
-		Collectors: make([]CollectorConfig, 0),
+		collectors: make([]collectorConfig, 0),
 	}
 }
 
-func (ctrl Controller) Handle() http.Handler {
+func (ctrl *Controller) Add(validity time.Duration, c Collector) {
+	ctrl.collectors = append(ctrl.collectors, collectorConfig{
+		collector: c,
+		validity:  validity,
+	})
+}
+
+func (ctrl *Controller) Handler() http.Handler {
 	ji := jsoniter.ConfigFastest
 	caches := make(map[int]*bigcache.BigCache)
-	for i, cc := range ctrl.Collectors {
-		if cc.Validity == time.Duration(0) {
+	for i, cc := range ctrl.collectors {
+		if cc.validity == time.Duration(0) {
 			caches[i] = nil
 			continue
 		}
-		cache, _ := bigcache.New(context.Background(), bigcache.DefaultConfig(cc.Validity))
+		cache, _ := bigcache.New(context.Background(), bigcache.DefaultConfig(cc.validity))
 		caches[i] = cache
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g := wait.WithContext[json.RawMessage](r.Context())
-		for i := range ctrl.Collectors {
-			g.Go(pullFragment(ctrl.Collectors[i], caches[i], r))
+		for i := range ctrl.collectors {
+			g.Go(pullFragment(ctrl.collectors[i], caches[i], r))
 		}
 
 		var document bytes.Buffer
@@ -52,15 +64,18 @@ func (ctrl Controller) Handle() http.Handler {
 		fs := ji.BorrowStream(&document)
 		fs.WriteObjectStart()
 
+		var comma atomic.Bool
+
 		if err := g.Gather(func(f json.RawMessage) {
 			fi := ji.BorrowIterator(f).ReadAny()
 			keys := fi.Keys()
-			for i, k := range keys {
-				fs.WriteObjectField(k)
-				fi.Get(k).WriteTo(fs)
-				if i != len(keys)-1 {
+			for _, k := range keys {
+				if comma.Swap(true) {
 					fs.WriteMore()
 				}
+
+				fs.WriteObjectField(k)
+				fi.Get(k).WriteTo(fs)
 			}
 		}); err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -70,7 +85,6 @@ func (ctrl Controller) Handle() http.Handler {
 
 		fs.WriteObjectEnd()
 		fs.Flush()
-		document.WriteRune('\n')
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -78,9 +92,9 @@ func (ctrl Controller) Handle() http.Handler {
 	})
 }
 
-func pullFragment(c CollectorConfig, cache *bigcache.BigCache, r *http.Request) func(ctx context.Context) (json.RawMessage, error) {
+func pullFragment(c collectorConfig, cache *bigcache.BigCache, r *http.Request) func(ctx context.Context) (json.RawMessage, error) {
 	return func(ctx context.Context) (json.RawMessage, error) {
-		requestID, err := c.Prepare(r)
+		requestID, err := c.collector.Prepare(r)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to prepare for request")
 		}
@@ -92,7 +106,7 @@ func pullFragment(c CollectorConfig, cache *bigcache.BigCache, r *http.Request) 
 			}
 		}
 
-		fragment, err := c.Collect(r)
+		fragment, err := c.collector.Collect(r)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to collect fragment for request")
 		}
