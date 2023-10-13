@@ -15,6 +15,67 @@ import (
 var tokenString = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJmb28iOiJiYXIiLCJpc3MiOiJ0ZXN0IiwiYXVkIjoic2luZ2xlIn0.QAWg1vGvnqRuCFTMcPkjZljXHh8U3L_qUjszOtQbeaA"
 
 func TestMedia(t *testing.T) {
+	db := testDatabase(t)
+
+	flowerServer := httptest.NewServer(mockFlowers())
+	defer func() { flowerServer.Close() }()
+
+	c := media.Config{
+		Database:          db,
+		Client:            http.DefaultClient,
+		SupportedVersions: []string{"api/v1/", "api/v2/"},
+		FlowersURL:        flowerServer.URL,
+	}
+	h := media.Handler(c)
+
+	t.Run("requst_v1", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/media", http.NoBody)
+		r.Header.Add("Authorization", "Bearer "+tokenString)
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusOK, w.Result().StatusCode)
+		require.JSONEq(t, `{
+			"privacy_document": "<h1>Privacy</h1>",
+			"user_agreement": "...",
+			"flowers": [
+				"https://cdn.ic-n.uk/flowers/Daffodil.png",
+				"https://cdn.ic-n.uk/flowers/Jasmine.png"
+			]
+		}`, w.Body.String())
+	})
+
+	t.Run("requst_v2", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/api/v2/media", http.NoBody)
+		r.Header.Add("Authorization", "Bearer "+tokenString)
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusOK, w.Result().StatusCode)
+		require.JSONEq(t, `{
+			"privacy_document": "<h1>No privacy</h1>",
+			"user_agreement": "...",
+			"flowers": [
+				"https://cdn.ic-n.uk/flowers/Daffodil.png",
+				"https://cdn.ic-n.uk/flowers/Jasmine.png"
+			]
+		}`, w.Body.String())
+	})
+}
+
+func mockFlowers() http.HandlerFunc {
+	return http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		res.WriteHeader(http.StatusOK)
+		res.Write([]byte(`[
+			"https://cdn.ic-n.uk/flowers/Daffodil.png",
+			"https://cdn.ic-n.uk/flowers/Jasmine.png"
+		]`))
+	})
+}
+
+func testDatabase(t *testing.T) *gorm.DB {
+	t.Helper()
+
 	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
 
@@ -32,30 +93,5 @@ func TestMedia(t *testing.T) {
 			PrivacyHTML: "<h1>No privacy</h1>",
 		},
 	})
-
-	c := media.Config{
-		Database:          db,
-		SupportedVersions: []string{"api/v1/", "api/v2/"},
-	}
-	h := media.Handler(c)
-
-	t.Run("requst_v1", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/v1/media", http.NoBody)
-		r.Header.Add("Authorization", "Bearer "+tokenString)
-		h.ServeHTTP(w, r)
-
-		require.Equal(t, http.StatusOK, w.Result().StatusCode)
-		require.JSONEq(t, `{"privacy_document":"<h1>Privacy</h1>", "user_agreement":"..."}`, w.Body.String())
-	})
-
-	t.Run("requst_v2", func(t *testing.T) {
-		w := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodGet, "/api/v2/media", http.NoBody)
-		r.Header.Add("Authorization", "Bearer "+tokenString)
-		h.ServeHTTP(w, r)
-
-		require.Equal(t, http.StatusOK, w.Result().StatusCode)
-		require.JSONEq(t, `{"privacy_document":"<h1>No privacy</h1>", "user_agreement":"..."}`, w.Body.String())
-	})
+	return db
 }

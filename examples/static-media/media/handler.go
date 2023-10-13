@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/ic-n/legacy-endpoint/examples/static-media/media/collectors"
 	"github.com/ic-n/legacy-endpoint/legend"
@@ -13,6 +14,7 @@ type Config struct {
 	Database          *gorm.DB
 	Client            *http.Client
 	SupportedVersions []string
+	FlowersURL        string
 }
 
 func Handler(config Config) http.Handler {
@@ -25,6 +27,11 @@ func Handler(config Config) http.Handler {
 	media.Add(0, &collectors.Version{
 		Database:      config.Database,
 		ValidVersions: versions,
+	})
+
+	media.Add(time.Second, &collectors.FlowerCDN{
+		Client: config.Client,
+		URL:    config.FlowersURL,
 	})
 
 	h := media.Handler()
