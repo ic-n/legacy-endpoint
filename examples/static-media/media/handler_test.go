@@ -28,6 +28,32 @@ func TestMedia(t *testing.T) {
 	}
 	h := media.Handler(c)
 
+	t.Run("no_auth", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/media", http.NoBody)
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
+	})
+
+	t.Run("invalid_version", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/media", http.NoBody)
+		r.Header.Add("Authorization", "Bearer "+tokenString)
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
+	})
+
+	t.Run("unsupported_version", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/api/v4/media", http.NoBody)
+		r.Header.Add("Authorization", "Bearer "+tokenString)
+		h.ServeHTTP(w, r)
+
+		require.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
+	})
+
 	t.Run("requst_v1", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/media", http.NoBody)
