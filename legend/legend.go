@@ -67,6 +67,10 @@ func (ctrl *Controller) Handler() http.Handler {
 		var comma atomic.Bool
 
 		if err := g.Gather(func(f json.RawMessage) {
+			if len(f) == 0 {
+				return
+			}
+
 			fi := ji.BorrowIterator(f).ReadAny()
 			keys := fi.Keys()
 			for _, k := range keys {
